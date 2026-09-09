@@ -56,6 +56,38 @@ DEPARTMENTS = [
 
 st.set_page_config(page_title="ลงทะเบียนข้อมูลพนักงาน", page_icon="📝", layout="centered")
 
+BACKGROUND_IMAGE_FILE = "background.jpg"
+
+
+def set_background_image(image_path: str, opacity: float = 0.2):
+    """ตั้งรูปภาพเป็นพื้นหลังของแอป โดยปรับความโปร่งใสให้ไม่บดบังตัวอักษร"""
+    try:
+        with open(image_path, "rb") as f:
+            encoded = base64.b64encode(f.read()).decode()
+    except FileNotFoundError:
+        return
+    st.markdown(
+        f"""
+        <style>
+        .stApp::before {{
+            content: "";
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background-image: url("data:image/jpeg;base64,{encoded}");
+            background-size: cover;
+            background-position: center;
+            background-repeat: no-repeat;
+            opacity: {opacity};
+            z-index: -1;
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+set_background_image(BACKGROUND_IMAGE_FILE, opacity=0.2)
+
 
 def github_headers() -> dict:
     """ส่วนหัว request สำหรับเรียก GitHub API พร้อม token จาก Secrets"""
