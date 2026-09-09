@@ -1,16 +1,27 @@
 """
 แอปฟอร์มลงทะเบียนข้อมูลพนักงาน
-ให้พนักงานกรอกข้อมูลเอง แล้วบันทึกลงไฟล์ Excel (employees.xlsx)
-ถ้ายังไม่มีไฟล์ แอปจะสร้างไฟล์ใหม่ให้อัตโนมัติตอนมีคนกรอกครั้งแรก
+ให้พนักงานกรอกข้อมูลเอง แล้วบันทึกลงไฟล์ Excel (CSR_NAME.xlsx) บน GitHub โดยตรง
+ผ่าน GitHub API เพื่อให้ข้อมูลอยู่ถาวร ไม่หายเมื่อแอป restart
 """
 
-import streamlit as st
-import pandas as pd
-from datetime import datetime
-import os
+import base64
+import io
 import re
+from datetime import datetime
 
-EXCEL_FILE = "CSR_NAME.xlsx"
+import pandas as pd
+import requests
+import streamlit as st
+
+# ---------- ตั้งค่า GitHub repo ที่จะใช้เก็บไฟล์ ----------
+GITHUB_OWNER = "ITBASz"
+GITHUB_REPO = "CSR"
+GITHUB_BRANCH = "main"
+GITHUB_FILE_PATH = "CSR_NAME.xlsx"
+GITHUB_API_URL = (
+    f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{GITHUB_FILE_PATH}"
+)
+
 SHEET_NAME = "พนักงาน"
 
 COLUMNS = [
@@ -46,17 +57,46 @@ DEPARTMENTS = [
 st.set_page_config(page_title="ลงทะเบียนข้อมูลพนักงาน", page_icon="📝", layout="centered")
 
 
-def load_data() -> pd.DataFrame:
-    """โหลดข้อมูลเดิมจากไฟล์ ถ้ายังไม่มีไฟล์ให้คืนตารางเปล่า"""
-    if not os.path.exists(EXCEL_FILE):
-        return pd.DataFrame(columns=COLUMNS)
-    return pd.read_excel(EXCEL_FILE, sheet_name=SHEET_NAME, dtype=str).fillna("")
+def github_headers() -> dict:
+    """ส่วนหัว request สำหรับเรียก GitHub API พร้อม token จาก Secrets"""
+    token = st.secrets["github_token"]
+    return {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github+json",
+    }
 
 
-def save_data(df: pd.DataFrame):
-    """บันทึกตารางทั้งหมดกลับลงไฟล์ Excel (สร้างไฟล์ใหม่ถ้ายังไม่มี)"""
-    with pd.ExcelWriter(EXCEL_FILE, engine="openpyxl", mode="w") as writer:
+def load_data():
+    """ดึงไฟล์ Excel ล่าสุดจาก GitHub มาอ่าน คืนค่า (DataFrame, sha ของไฟล์)
+    ถ้ายังไม่มีไฟล์บน GitHub ให้คืนตารางเปล่าและ sha เป็น None"""
+    resp = requests.get(
+        GITHUB_API_URL, headers=github_headers(), params={"ref": GITHUB_BRANCH}
+    )
+    if resp.status_code == 404:
+        return pd.DataFrame(columns=COLUMNS), None
+    resp.raise_for_status()
+    data = resp.json()
+    content = base64.b64decode(data["content"])
+    df = pd.read_excel(io.BytesIO(content), sheet_name=SHEET_NAME, dtype=str).fillna("")
+    return df, data["sha"]
+
+
+def save_data(df: pd.DataFrame, sha):
+    """เขียนตารางทั้งหมดกลับเป็นไฟล์ Excel แล้ว commit ขึ้น GitHub ทันที"""
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name=SHEET_NAME)
+
+    payload = {
+        "message": f"อัปเดตข้อมูลพนักงาน {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        "content": base64.b64encode(buffer.getvalue()).decode("utf-8"),
+        "branch": GITHUB_BRANCH,
+    }
+    if sha:
+        payload["sha"] = sha
+
+    resp = requests.put(GITHUB_API_URL, headers=github_headers(), json=payload)
+    resp.raise_for_status()
 
 
 def is_valid_phone(phone: str) -> bool:
@@ -85,8 +125,6 @@ with st.form("registration_form", clear_on_submit=True):
         errors = []
         if not full_name.strip():
             errors.append("กรุณากรอกชื่อ-นามสกุล")
-        if not department.strip():
-            errors.append("กรุณากรอกชื่อแผนก")
         if not phone.strip():
             errors.append("กรุณากรอกเบอร์โทร")
         elif not is_valid_phone(phone):
@@ -96,18 +134,24 @@ with st.form("registration_form", clear_on_submit=True):
             for e in errors:
                 st.error(e)
         else:
-            df = load_data()
-            new_row = {
-                "วันที่-เวลาลงทะเบียน": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "ชื่อ-นามสกุล": full_name.strip(),
-                "ชื่อแผนก": department.strip(),
-                "Size เสื้อ": shirt_size,
-                "เบอร์โทร": phone.strip(),
-                "โรคประจำตัว": medical_condition.strip(),
-            }
-            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-            save_data(df)
-            st.success(f"บันทึกข้อมูลของคุณ {full_name.strip()} เรียบร้อยแล้ว 🎉")
+            try:
+                df, sha = load_data()
+                new_row = {
+                    "วันที่-เวลาลงทะเบียน": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "ชื่อ-นามสกุล": full_name.strip(),
+                    "ชื่อแผนก": department.strip(),
+                    "Size เสื้อ": shirt_size,
+                    "เบอร์โทร": phone.strip(),
+                    "โรคประจำตัว": medical_condition.strip(),
+                }
+                df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+                save_data(df, sha)
+                st.success(f"บันทึกข้อมูลของคุณ {full_name.strip()} เรียบร้อยแล้ว 🎉")
+            except Exception as e:
+                st.error(f"บันทึกข้อมูลไม่สำเร็จ กรุณาลองใหม่อีกครั้ง ({e})")
 
 st.divider()
-st.caption(f"จำนวนผู้ลงทะเบียนทั้งหมด: {len(load_data())} คน")
+try:
+    st.caption(f"จำนวนผู้ลงทะเบียนทั้งหมด: {len(load_data()[0])} คน")
+except Exception:
+    st.caption("ไม่สามารถโหลดจำนวนผู้ลงทะเบียนได้ในขณะนี้")
